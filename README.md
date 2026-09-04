@@ -1,6 +1,10 @@
-# Codex Desktop Guard
+# Codex Desktop Fixer
 
 **Stop the OpenAI Codex / ChatGPT desktop app from "not opening" — automatically.**
+
+> The core component is a scheduled-task **guard** (`codex-guard.ps1`) that runs
+> every minute and heals problems on its own; `fix-codex.ps1` is a manual
+> one-shot variant for when you want to fix it right now.
 
 A tiny scheduled-task guard for Windows that watches the Codex desktop app
 (an MSIX/Electron app whose main process is currently named `ChatGPT.exe`)
