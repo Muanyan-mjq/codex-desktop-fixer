@@ -26,8 +26,9 @@ $TaskName = 'CodexGuard'
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $src = $PSScriptRoot
 if (-not $src) { $src = Split-Path -Parent $MyInvocation.MyCommand.Path }
-Copy-Item (Join-Path $src 'codex-guard.ps1') (Join-Path $InstallDir 'codex-guard.ps1') -Force
-Copy-Item (Join-Path $src 'fix-codex.ps1')   (Join-Path $InstallDir 'fix-codex.ps1')   -Force
+Copy-Item (Join-Path $src 'codex-guard.ps1')   (Join-Path $InstallDir 'codex-guard.ps1')   -Force
+Copy-Item (Join-Path $src 'fix-codex.ps1')     (Join-Path $InstallDir 'fix-codex.ps1')     -Force
+Copy-Item (Join-Path $src 'uninstall.ps1')     (Join-Path $InstallDir 'uninstall.ps1')     -Force
 
 # ---- 2. generate VBS launcher (hidden, no console window) ----
 $guardPath = Join-Path $InstallDir 'codex-guard.ps1'
@@ -53,5 +54,5 @@ Write-Host ""
 Write-Host "Manual one-shot fix (run any time):"
 Write-Host "   powershell -NoProfile -ExecutionPolicy Bypass -File `"$InstallDir\fix-codex.ps1`""
 Write-Host ""
-Write-Host "To uninstall later:"
-Write-Host "   powershell -NoProfile -ExecutionPolicy Bypass -File `"$src\uninstall.ps1`""
+Write-Host "To uninstall later (either location works):"
+Write-Host "   powershell -NoProfile -ExecutionPolicy Bypass -File `"$InstallDir\uninstall.ps1`""
