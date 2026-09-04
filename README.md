@@ -136,4 +136,4 @@ Diagnosed 2026-09 on a real machine that "sometimes opened, sometimes didn't":
 
 ## License
 
-MIT
+MIT License — see [LICENSE](LICENSE). Community project, not affiliated with OpenAI.
