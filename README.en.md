@@ -2,140 +2,290 @@
 
 [中文](README.md) | English
 
-**Stop the OpenAI Codex / ChatGPT desktop app from "not opening" — automatically.**
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![Platform: Windows](https://img.shields.io/badge/platform-Windows-blue)
 
-> The core component is a scheduled-task **guard** (`codex-guard.ps1`) that runs
-> every minute and heals problems on its own; `fix-codex.ps1` is a manual
-> one-shot variant for when you want to fix it right now.
-
-A tiny scheduled-task guard for Windows that watches the Codex desktop app
-(an MSIX/Electron app whose main process is currently named `ChatGPT.exe`)
-and heals the two failure modes that make it look like it "won't open":
-
-1. **Stuck instance on startup** — the app sometimes blocks very early in its
-   startup sequence (we observed a `load shell env` step blocking for **526
-   seconds**; the app's 5-second timeout never fired). The instance has **no
-   window**, yet it holds the app's **single-instance lock** — so every further
-   click spawns a process that instantly and silently exits. Result: the app
-   "never opens" until the stuck instance dies (or you reboot).
-2. **Window parked off-screen** — after a stuck instance finally recovers, its
-   main window can be minimized to an absurd off-screen coordinate
-   (e.g. `-21333,-21333`). The process is healthy, the window exists, but you
-   can't see it — and single-instance forwarding keeps sending every new click
-   to that invisible window.
-
-The guard runs every minute (invisibly — no console window ever flashes) and:
-
-- **kills** a main instance that has been alive > 3 minutes with **zero
-  top-level windows** (frees the single-instance lock, so your next click is a
-  clean launch);
-- **restores** visible main windows that sit off-screen;
-- **never touches** healthy instances — minimized, tray-hidden, or on another
-  virtual desktop are all safe;
-- **never reads or writes any app data** — your chat history, login state and
-  configs are untouched. Every action is logged to `%TEMP%\codex-guard.log`.
-
-> ⚠️ Third-party community tool, not affiliated with OpenAI. The stuck-startup
-> behavior is a bug inside the app itself; this guard makes it self-healing,
-> it cannot prevent the bug from firing.
+> Stop the OpenAI Codex / ChatGPT desktop app from "not opening" — auto-guard plus one-shot repair.
+>
+> ⚠️ Community tool, not affiliated with OpenAI.
 
 ---
 
-## Symptoms this addresses
+## What is this?
 
-- The Codex / ChatGPT desktop app *sometimes* opens and *sometimes* doesn't.
-- Clicking the icon repeatedly does nothing (each click is swallowed).
-- A `ChatGPT.exe` process is running in Task Manager, but no window appears.
-- It "magically works again" after a reboot or after killing processes.
+The Codex desktop app (an MSIX-packaged Electron app; its main process is currently `ChatGPT.exe`) can present as "it just won't open" in **four distinct ways**. v1 covered only one of them, and its criteria were off. v2 covers all four:
+
+| # | Failure mode | What you see | What v2 does |
+|---|---|---|---|
+| ① | **Stuck instance** | Processes are alive but the app owns **zero top-level windows**, and it holds the **single-instance lock** — so every later click just spawns a process that exits instantly | Reaps app instances that have been alive past the threshold with zero windows, releasing the lock |
+| ② | **Wedged AppX container** | **Not a single process exists**, yet Windows insists the package is in use; "Repair" in Settings always fails with `0x80073D02` | ❌ **Cannot be fixed by a script** — only sign-out / reboot clears it (this tool never reboots your machine) |
+| ③ | **Unreachable window** | The window **exists** but has `WS_VISIBLE = false` (hidden), or sits at the minimization parking spot | Hidden ones are shown again **only when the user cannot see any window at all**; minimized ones are left alone |
+| ④ | **Slow runtime staging after an update** | First launch after an update unpacks a bundled Node runtime (2,367 files / 240 MB) — about **6 minutes with no window at all**, which looks exactly like "won't open" | Detects the slow path and **takes over**: lays down the runtime itself (~10 s), then restarts the app |
+
+**Safety boundary**: the guard never reads or writes your chats, sign-in state, or config; it never disturbs a healthy instance (minimized, tray-hidden, other virtual desktops are all safe). Every action is logged to `%TEMP%\codex-guard.log`.
+
+## Symptoms this covers
+
+- The app is **intermittent**: sometimes it opens, sometimes clicking does nothing
+- Clicking the icon repeatedly does not help (each click is swallowed by an invisible instance)
+- `ChatGPT.exe` shows up in Task Manager, but there is no window
+- The first launch after an update takes several minutes
+- Rebooting / killing the processes "fixes it again"
+
+---
+
+## Four corrections v2 makes to v1 (all backed by measurements)
+
+### 1. `(-21333,-21333)` is **minimized**, not "off-screen"
+
+```text
+showCmd     = 2          (1=normal 2=minimized 3=maximized)
+WS_MINIMIZE = True
+rect        = (-21333,-21333)  size 158x26
+normal      = (214,102)-(1494,918)     <- the restore position is perfectly healthy
+At the same moment, 10 of the 561 top-level windows on the desktop sit at (-21333,-21333)
+          (Chrome, WeChat, Douyin, Clash Verge, Obsidian, VMware, Explorer, ...)
+```
+
+Ten unrelated applications parked at the exact same coordinate can only be a system behavior — **that is the fixed coordinate Windows uses for minimized windows**.
+
+**Impact**: v1's "off-screen" check fired on **any minimized window**. It "worked twice" because it called `SW_RESTORE`, not because the window was actually off-screen.
+**v2**: leaves minimized windows alone by default (they are reachable from the taskbar); pass `-RescueMinimized` if you want them pulled forward.
+
+### 2. v1 skipped hidden windows — which happens to be the most common failure here
+
+The line in v1:
+
+```powershell
+if (-not [GuardWin]::IsWindowVisible($hwnd)) { continue }   # never touch hidden windows
+```
+
+But the actual failure state measured on this machine was:
+
+```text
+pid=131808  visible=False  minimized=False  WS_VISIBLE=False  (214,102) 1280x816  'ChatGPT'
+pid=157656  visible=False  minimized=False  WS_VISIBLE=False  (0,0) 1707x1067  'ChatGPT is using your computer. Esc to cancel'
+```
+
+**Minimized vs hidden — the decisive difference is whether the user can recover it themselves**:
+
+- Minimized → there is a taskbar entry → the user can restore it → **leave it alone**
+- Hidden (`WS_VISIBLE=false`) → **no taskbar entry → the user has no normal way back** → **must be rescued**
+
+**v2 adds**: hidden + main-window sized (≥400×400) + has a title → `SW_SHOW` → `SW_RESTORE` → move on-screen → foreground, **and only when the app currently has no usable window** (visible, not minimized, main-window sized, mostly on-screen).
+
+Why that extra condition: a **healthy running app was measured owning one visible main window *and* one hidden same-sized sibling window**. Acting on "hidden + big enough" alone would have popped an extra window at the user out of nowhere. This false positive was caught by an actual `-DryRun` on a live machine, not by reasoning on paper:
+
+```text
+# before the fix (would have popped it)
+HIDDEN title='ChatGPT' rect=(127,0,1256,1067) -> showing at (127,0)
+
+# after the fix (correctly skipped)
+HIDDEN 1 hidden window(s) left alone - the app already has a usable on-screen window
+```
+
+**Safety boundary**: **never show the computer-use overlay** (the one titled `is using your computer` is a full-screen window; showing it would cover the entire desktop).
+
+### 3. v1 queried processes with WMI, which **cannot see them here** — so the reap never fired
+
+```text
+Get-CimInstance Win32_Process -Filter "Name='ChatGPT.exe'"   ->  0 rows
+Get-Process -Name ChatGPT                                   ->  10 processes
+```
+
+On this machine WMI (`Win32_Process`) does not list these processes at all. v1's reap logic depended on it, so it **could never trigger** — which is exactly why zombie instances stayed around forever.
+
+**v2**: process discovery uses `Get-Process` only. It also turned ① into a **whole-app condition** ("the app has processes, the app owns zero top-level windows, and it has been that way past the threshold") instead of a per-process test — Electron helper processes never own a window, so a per-process test would misfire on healthy instances.
+
+### 4. v1's 180-second threshold vs a 6-minute unpack → v1 created the loop itself
+
+Measured root cause of ④ (the most subtle one on this machine):
+
+```text
+Attribute of files inside the app package = Archive, Encrypted   (2,367 / 2,367 files in cua_node)
+OS edition                                = Home -> no EFS support
+EFS certificate for the current user      = none
+-> plain copy (preserves the encryption attribute)  0 / 2,367 succeeded, 338 s, "The specified file could not be encrypted."
+-> streaming read/write (drops the attribute)       2,367 / 2,367 succeeded, 10.6 s (22.6 MB/s)
+```
+
+Each file first tries to re-encrypt the destination, fails, and wastes ~0.14 s → 2,367 files ≈ **6 minutes**, with no window on screen. The logs contain 9 half-finished `.staging-<content hash>-<random>` directories.
+
+**v1 killed that legitimately-staging process at second 180** → progress reset → the user clicks again → loop.
+**v2 takes over ④**:
+
+```text
+Sees a .staging-* directory under runtimes\cua_node\ while the app has been up > 60 s
+  -> declares the slow path (a clean copy needs 10 s)
+  -> reads the target hash from the directory name
+  -> kills the app
+  -> stream-copies the package's resources\cua_node to <hash>\ (~10 s; verifies file count + manifest SHA256)
+  -> restarts the app -> instant
+```
+
+Because ④ no longer exists as a legitimate reason for a long window-less startup, ①'s threshold is safe at **300 seconds**.
+
+---
 
 ## Install
 
+No administrator rights needed:
+
 ```powershell
-# from a PowerShell (no admin rights needed):
 powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
 ```
 
-This copies the scripts to `%LOCALAPPDATA%\CodexGuard`, generates a hidden VBS
-launcher, and registers scheduled task `CodexGuard` (every minute, interactive
-session only).
+The installer copies `codex-guard.ps1` / `fix-codex.ps1` / `uninstall.ps1` to `%LOCALAPPDATA%\CodexGuard`, generates a hidden launcher, and registers the scheduled task `CodexGuard` (every minute, only while you are logged on).
 
 ### Options
 
+| Option | Meaning | Default |
+|---|---|---|
+| `-ProcessName` | Main process name (if upstream renames it) | `ChatGPT.exe` |
+| `-IntervalMinutes` | Check interval in minutes | `1` |
+| `-InstallDir` | Install location | `%LOCALAPPDATA%\CodexGuard` |
+
 ```powershell
-# target a differently-named main process:
-powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ProcessName codex.exe
-
-# check every 2 minutes instead of 1:
-powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -IntervalMinutes 2
-
-# custom install location:
-powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -InstallDir D:\tools\CodexGuard
+# different process name / every 2 minutes / custom install dir
+powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ProcessName codex.exe -IntervalMinutes 2 -InstallDir D:\tools\CodexGuard
 ```
 
-## Manual one-shot fix
+## One-shot manual repair
 
-When the app seems stuck right now (no need to wait for the next guard tick):
+When the app is stuck right now and you do not want to wait for the next scheduled pass:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\CodexGuard\fix-codex.ps1"
 ```
 
+`fix-codex.ps1` is a **thin wrapper** around `codex-guard.ps1` (the same three jobs, one pass), so the two can never drift apart.
+
+To see what it *would* do without touching anything:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\CodexGuard\codex-guard.ps1" -DryRun
+```
+
+## Parameter reference (`codex-guard.ps1`)
+
+| Option | Default | Meaning |
+|---|---|---|
+| `-StuckAgeSeconds` | `300` | ① age threshold for declaring an instance stuck |
+| `-StagingGraceSeconds` | `60` | ④ grace period before declaring the slow path |
+| `-RescueMinimized` | off | Also pull **minimized** windows forward (off by default to respect the user) |
+| `-NoRelaunch` | off | ④ do not restart the app after the runtime is laid down |
+| `-MainWinMinSize` | `400` | ③ minimum size for a hidden window to count as the main window |
+| `-DryRun` | off | Report only, change nothing |
+
+## How it works and its safety rules
+
+| Rule | Why |
+|---|---|
+| Process discovery uses `Get-Process`, never WMI | WMI cannot see these processes on this machine (see correction 3) |
+| ① only reaps when the **whole app has zero top-level windows** and is past the threshold | Electron helpers never own a window; a per-process test would misfire |
+| ③ rescues **hidden** main windows only, and **only when the app has no usable window at all**; **minimized windows are never touched** | Minimized windows have a taskbar entry, and when the user can already see a window a hidden sibling is intentional |
+| ③ never shows the computer-use overlay | It is a full-screen window and would cover the desktop |
+| ④ only takes over when a `.staging-*` dir is still present after 60 s | A clean copy completes in 10 s; still going after 60 s means the slow path |
+| ④ verifies file count + `manifest.json` SHA256 before publishing | Never hands the app a broken copy of our own making |
+| ② **is deliberately not automated** | `0x80073D02` cannot be fixed by a script, and rebooting would drop whatever the user is doing — that stays a human decision |
+| Never reads or writes app chat / config / account data | Zero data risk |
+| Logs every action (`%TEMP%\codex-guard.log`, rotated at 1 MB) | Every automatic action is auditable |
+
+## No flashing console window
+
+`powershell -WindowStyle Hidden` frequently has **no effect when launched from a scheduled task** (that is why many watchdog scripts flash a black window every minute). This project has the task run `wscript.exe` (a GUI-subsystem process that **never creates a console window**), which then starts the guard hidden.
+
+---
+
+## The two bundled tools (different failure class)
+
+These are not "won't open"; they are **configuration** failures of the Codex desktop app, so they ship as separate scripts.
+
+### `remove-claude-imports.ps1` — undo the "external agent import"
+
+The app has an `external-agent-import-sync` feature (it imports Claude Code sessions / config / skills into Codex). Accidentally enabling it brings over:
+
+| Imported | Lands in |
+|---|---|
+| Conversations | `~/.codex/sessions/<date>/rollout-*.jsonl` |
+| Config | the whole `env` block of `~/.claude/settings.json` written into `config.toml`'s `[shell_environment_policy.set]` (**including a token**) |
+| MCP config | merged at runtime — the usual side effect is the `mcp_servers.github` error below |
+| Skills | `~/.agents/skills/` |
+
+Usage (**fully quit the app first, tray icon included**):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File remove-claude-imports.ps1 -DryRun   # preview
+powershell -NoProfile -ExecutionPolicy Bypass -File remove-claude-imports.ps1
+```
+
+It flips the switch off, **deletes** the imported conversation files using the import ledger, and backs up `config.toml`. Details and the three gotchas are in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+### `fix-github-mcp.ps1` — fix `url is not supported for stdio in mcp_servers.github`
+
+The same MCP server name `github` is defined by **several sources with different transports**, and the merge fails:
+
+| Source | Transport |
+|---|---|
+| `~/.codex/config.toml` | **stdio** (`npx mcp-remote`) |
+| `~/.mcp.json` | http (`url`) |
+| Store plugin / plugin caches | http (`url`) |
+
+Merged result = a stdio server carrying a `url` → validation fails → **config.toml fails to load entirely and the app is unusable**.
+
+```powershell
+# recommended: make config.toml http too, matching the other sources (works regardless of which source supplies the url)
+... -File fix-github-mcp.ps1 -Mode Native -SetToken
+
+# conservative: leave config.toml and secrets alone; just rename the key in ~/.mcp.json
+... -File fix-github-mcp.ps1 -Mode RenameImport
+```
+
+`-SetToken` lifts the token out of `~/.codex/mcp-headers.txt` into user environment variables (**the token value is never printed**). If you already have a working `GITHUB_PAT` environment variable, pointing `bearer_token_env_var` at it is simpler still.
+
+> Environment variables only reach **newly started** processes → fully quit and reopen the app afterwards.
+
+---
+
+## Verification status (stated honestly)
+
+| Item | Status |
+|---|---|
+| Script syntax (Windows PowerShell 5.1 parser) | ✅ passes |
+| `-DryRun` executed for real | ✅ all three scripts |
+| Scheduled task creates no console flash | ✅ measured (carried over from v1, unchanged) |
+| ① no false positives on healthy instances | ✅ by design; v2's whole-app condition is strictly more conservative |
+| ① end-to-end reap | ⚠️ criteria come from a real stuck instance, but "after the reap the next click is a clean start" has not been verified against a live stuck instance |
+| ③ hidden-window rescue | criteria ✅ **verified by running `-DryRun` on the live machine** (correctly distinguishes "the app has a usable window" from "the user can see nothing", and caught one false positive); whether `ShowWindow` actually takes effect ⚠️ still not verified end to end (no effect on another process from inside a restricted sandbox) |
+| ④ taking over the slow staging | ⚠️ **inferred**. The copied output's `manifest.json` SHA256 matches the official one exactly, but "the app accepts a hand-placed directory" can only be verified on the next app update |
+| ② wedged AppX container | Only "a reboot clears it" is measured; the script deliberately does nothing here |
+| Never touches your data | ✅ by design (no app chat / account paths appear in the scripts) |
+
+Every threshold is adjustable at the top of `codex-guard.ps1` or via command-line parameters.
+
+**Recommended first run**: execute `fix-codex.ps1` by hand (not the scheduled task), confirm its decisions in `%TEMP%\codex-guard.log`, and only then let the scheduled task take over.
+
 ## Uninstall
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1        # remove task only
-powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1 -Purge # also delete installed files
+# remove the scheduled task only
+powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1
+
+# also delete the installed script files
+powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1 -Purge
 ```
 
-## How it works / safety rules
+The app itself and your data were never touched.
 
-| Rule | Rationale |
-|---|---|
-| Only processes named `ChatGPT.exe` *without* `--type=` (i.e. main instances) are considered | child processes (GPU/renderer/utility) must never be killed independently |
-| Kill only when the instance is **> 3 min old** AND has **zero top-level windows** | a normal launch shows its window within ~10 s; the 3-min age makes false kills impossible |
-| A window being *present* (even hidden/minimized) always means "leave it alone" | user-minimized or tray-hidden sessions are intentional |
-| Visible windows with normal on-screen rects are never touched | nothing to fix |
-| No config/data file of the app is read or written | zero data risk |
+## Investigation notes
 
-## Why a VBS launcher (no console flash)?
+The full investigation, the raw log evidence, and the measured data behind `-21333`, the WMI blind spot, and the EFS attribute issue are in [TROUBLESHOOTING.md](TROUBLESHOOTING.md) (Chinese).
 
-`powershell -WindowStyle Hidden` is famously **ignored** when PowerShell is
-started by Task Scheduler, which makes a black console flash every minute.
-`wscript.exe` is a GUI-subsystem process — it can never create a console
-window. The scheduled task therefore runs `wscript.exe <launcher.vbs>`, which
-in turn runs the guard script hidden.
+## Feedback and contributions
 
-## Verification status (honest)
-
-| Path | Status |
-|---|---|
-| Healthy instance left untouched (no false positive) | ✅ tested |
-| Off-screen window pulled back (real `-21333` case) | ✅ tested twice in the field |
-| Stuck instance (no window > 3 min) auto-killed | ⚠️ logic built from a real 526 s stuck trace; end-to-end kill still awaits a real occurrence |
-| No console window flashes from the scheduled task | ✅ tested |
-| Data untouched | ✅ by design (scripts contain no app-data paths) |
-
-The stuck-detection parameters (`180 s`, off-screen overlap `50 px`) are
-tunable at the top of `codex-guard.ps1`.
-
-## Background evidence
-
-Diagnosed 2026-09 on a real machine that "sometimes opened, sometimes didn't":
-
-- Every click *did* start a process (AppModel-Runtime event 201), yet app logs
-  showed sessions ending after 3 lines — classic **single-instance hand-off**,
-  not crashes (no Windows Error Reporting entries at all).
-- The one instance that *did* survive startup had a main window at
-  `(-21333, -21333)`, minimized, size 158×26 — the window existed and was
-  "visible", just parked off-screen.
-- Its buffered full-session log (flushed on exit) showed the root blocker:
-  `Failed to load shell env ... durationMs=526778` — the startup path blocked
-  for ~9 minutes while a 5-second timeout silently failed to fire. The window
-  then appeared 2.5 s after the block cleared.
-- Conclusion: **launch didn't fail, it froze — and the frozen instance
-  locked out every subsequent launch.** That asymmetry is exactly the
-  "sometimes it opens, sometimes it doesn't" behavior.
+- Open an [Issue](https://github.com/Muanyan-mjq/codex-desktop-fixer/issues) (attach `%TEMP%\codex-guard.log` and describe the symptom)
+- Improvements: send a Pull Request
 
 ## License
 
-MIT License — see [LICENSE](LICENSE). Community project, not affiliated with OpenAI.
+[MIT](LICENSE)
