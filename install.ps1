@@ -42,12 +42,39 @@ $taskCmd = 'wscript.exe "{0}"' -f $vbsPath
 & schtasks.exe /Create /TN $TaskName /TR $taskCmd /SC MINUTE /MO $IntervalMinutes /F
 if ($LASTEXITCODE -ne 0) { throw "Failed to register scheduled task '$TaskName'" }
 
+# ---- 4. lift the battery restrictions ----
+# schtasks /Create unconditionally sets DisallowStartIfOnBatteries and
+# StopIfGoingOnBatteries to true, and exposes no switch for either. On a laptop
+# that means the guard silently stops guarding the moment you unplug - exactly
+# when you are least likely to notice. Patch the task XML and re-import it.
+$xmlPath = Join-Path $env:TEMP "codexguard-task-$PID.xml"
+try {
+    $xml = (schtasks.exe /Query /TN $TaskName /XML | Out-String)
+    $patched = $xml `
+        -replace '<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>', '<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>' `
+        -replace '<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>', '<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>'
+
+    if ($patched -eq $xml) {
+        Write-Host "   battery    : already unrestricted"
+    }
+    else {
+        # schtasks expects the task XML as UTF-16
+        [System.IO.File]::WriteAllText($xmlPath, $patched, [System.Text.Encoding]::Unicode)
+        & schtasks.exe /Create /TN $TaskName /XML $xmlPath /F | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Host "   battery    : guard also runs on battery power" }
+        else { Write-Warning "Could not lift the battery restriction - the guard will NOT run while unplugged. Re-run this script from an elevated prompt, or run: schtasks /Create /TN $TaskName /XML $xmlPath /F" }
+    }
+}
+catch { Write-Warning "Could not patch the task's power settings: $($_.Exception.Message)" }
+finally { Remove-Item $xmlPath -Force -ErrorAction SilentlyContinue }
+
 Write-Host "=============================================" -ForegroundColor Cyan
 Write-Host " CodexGuard installed" -ForegroundColor Cyan
 Write-Host "   app process : $ProcessName"
 Write-Host "   check every : $IntervalMinutes min"
 Write-Host "   scripts     : $InstallDir"
 Write-Host "   task        : $TaskName (runs via wscript, no console flash)"
+Write-Host "   runs while  : you are logged on (interactive only)"
 Write-Host "   log         : %TEMP%\codex-guard.log"
 Write-Host "=============================================" -ForegroundColor Cyan
 Write-Host ""

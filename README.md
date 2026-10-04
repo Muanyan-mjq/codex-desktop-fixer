@@ -162,6 +162,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ProcessName codex.exe -IntervalMinutes 2 -InstallDir D:\tools\CodexGuard
 ```
 
+### 运行条件（重要 —— 决定了它什么时候"其实没在守"）
+
+| 条件 | 说明 |
+|---|---|
+| **只在登录会话内运行** | 任务类型是 `InteractiveToken`。注销后、未登录时不跑（这是刻意的：它要操作窗口，必须在你的交互会话里） |
+| **笔记本拔电源后仍然运行** | `install.ps1` 会把 `DisallowStartIfOnBatteries` / `StopIfGoingOnBatteries` 改成 `false`。⚠️ **`schtasks /Create` 的默认值是 `true` 且没有开关可关** —— 不改的话一拔电源守护就静默停工，而那正是你最不容易发现的时候 |
+| 不叠加 | `MultipleInstancesPolicy = IgnoreNew`，上一轮没跑完不会起第二轮 |
+| 审计入口 | `%TEMP%\codex-guard.log`（超过 1 MB 轮转） |
+
+> **已经装过旧版本？** 重新跑一次 `install.ps1` 即可 —— 它会用 `/F` 覆盖任务并补上电池设置。
+
 ## 手动一键修复
 
 不想等下一轮巡检时：

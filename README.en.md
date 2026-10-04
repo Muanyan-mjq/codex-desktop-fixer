@@ -162,6 +162,17 @@ The installer copies `codex-guard.ps1` / `fix-codex.ps1` / `uninstall.ps1` to `%
 powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ProcessName codex.exe -IntervalMinutes 2 -InstallDir D:\tools\CodexGuard
 ```
 
+### Runtime conditions (important - they decide when it is *not* actually guarding)
+
+| Condition | Detail |
+|---|---|
+| **Only inside your logon session** | The task is `InteractiveToken`. It does not run while you are signed out (deliberately: it manipulates windows, so it needs your interactive session) |
+| **Keeps running on battery** | `install.ps1` rewrites `DisallowStartIfOnBatteries` / `StopIfGoingOnBatteries` to `false`. ⚠️ **`schtasks /Create` defaults both to `true` and offers no switch for them** - leave that alone and the guard silently stops the moment you unplug, which is exactly when you are least likely to notice |
+| No stacking | `MultipleInstancesPolicy = IgnoreNew`, so a slow pass never overlaps the next one |
+| Audit trail | `%TEMP%\codex-guard.log` (rotated at 1 MB) |
+
+> **Installed an older version before?** Just run `install.ps1` again - it overwrites the task with `/F` and applies the battery settings.
+
 ## One-shot manual repair
 
 When the app is stuck right now and you do not want to wait for the next scheduled pass:
