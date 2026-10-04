@@ -244,14 +244,38 @@ Crashpad 源码: kTerminationCodeCrashNoDump = 0xffff7001
 
 `.codex\.tmp\bundled-marketplaces` 里堆着 **57 个空的 `.staging-*` 目录**（7/7 起），每个 0 文件。与第 3 节同一个病因：从包内往外拷文件（`CopyFileW` 保留加密属性）失败。**至今没成功过一次。**
 
-### 5.3 WMI 看不见这些进程（重要，会坑脚本）
+### 5.3 一次"确凿"的误判：WMI 到底看不看得见这些进程
+
+排查过程中我在一个**受限制的上下文**里反复测到：
 
 ```text
 Get-CimInstance Win32_Process -Filter "Name='ChatGPT.exe'"   ->  0 行
-Get-Process -Name ChatGPT                                    ->  10 个
+Get-Process -Name ChatGPT                                   ->  10 个
 ```
 
-同一台机器、同一时刻。**任何依赖 `Win32_Process` 的脚本在这台机器上都会静默失效。** 写工具时用 `Get-Process`。
+同一台机器、同一时刻 —— 看起来铁证如山。我据此写下"本机 WMI 看不见这些进程，依赖它的脚本会静默失效"，并且把这个结论写进了仓库。
+
+**这个结论是错的。** 换到不受限制的上下文复测：
+
+```text
+Get-CimInstance Win32_Process -Filter "Name='ChatGPT.exe'"   ->  8 行
+CommandLine : "...\app\ChatGPT.exe"                                  ← 主实例
+CommandLine : "C:\Program Files\WindowsApps\OpenAI.Codex_...\app\ChatGPT.exe" --type=crashpad-handler ...   ← 子进程
+```
+
+而且 v1 守护自己的日志就是现成的反证 —— 它一直在用这套 WMI 查询工作：
+
+```text
+2026-10-04 15:58:03 STUCK pid=2532 age=852s no windows -> cleaning up
+2026-10-04 15:58:05 KILLED pid=2532 plus 0 child processes. Next launch will be a clean one.
+2026-10-04 16:02:03 STUCK pid=157492 age=240s no windows -> cleaning up
+…
+2026-10-04 16:15:05 KILLED pid=26364 plus 0 child processes.
+```
+
+**15:58–16:15 之间 11 次成功清理**，实例年龄 184s～854s。
+
+**真正的教训**：那是**测量环境的限制**（受限上下文里 WMI 查询被拦），不是被测量对象的属性。**任何结论都必须连同测量环境一起记录** ——"在沙箱里看不见"不等于"在机器上看不见"。
 
 ---
 
@@ -361,7 +385,7 @@ mcp_server_startup_status_updated error=null server=github status=ready
 ## 7. 排查工具箱（本次实际用过的命令）
 
 ```powershell
-# —— 看到底有没有进程（WMI 会骗你，两法并用）——
+# —— 看到底有没有进程（两法并用；受限上下文里 WMI 可能返回空，但机器上是正常的，见 5.3）——
 Get-Process -Name ChatGPT -ErrorAction SilentlyContinue
 Get-CimInstance Win32_Process -Filter "Name='ChatGPT.exe'"
 
@@ -409,3 +433,4 @@ Get-Item <文件> | Select-Object Attributes      # 看有没有 Encrypted
 | "config.toml 的 url 是外部 agent 导入带来的" | 关掉导入后**报错依旧** | 关掉一个开关 ≠ 消除所有来源；**改成结构上不可能冲突**才可靠 |
 | "应用在一个无窗口状态，说明是卡死实例" | 需要先分清是**没有窗口**还是**窗口存在但不可达** | 先把状态枚举清楚，再决定处置 |
 | "隐藏的主窗口一律该救回来" | 实测健康运行的应用同时有**可见主窗口**和**隐藏的同尺寸次级窗口** —— 一刀切会凭空多弹一个窗口 | 判据要加"用户当前能不能看到"这一层；这个假阳性是**实跑 `-DryRun`** 抓出来的，不是推演出来的 |
+| "WMI 在本机看不见 ChatGPT 进程，所以 v1 的清理从不触发" | 换到不受限上下文复测，**同样查询返回 8 行**；而且 v1 自己的日志显示它成功清理了 **11 次** | **在受限上下文里测出的"不可能"，不等于机器上的"不可能"**。下结论前先确认测量环境，并且**优先去找现成的反证**（这里 v1 的日志就是反证，它一直躺在那儿） |

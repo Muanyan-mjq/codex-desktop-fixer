@@ -13,7 +13,7 @@
 
 ## What is this?
 
-The Codex desktop app (an MSIX-packaged Electron app; its main process is currently `ChatGPT.exe`) can present as "it just won't open" in **four distinct ways**. v1 covered only one of them, and its criteria were off. v2 covers all four:
+The Codex desktop app (an MSIX-packaged Electron app; its main process is currently `ChatGPT.exe`) can present as "it just won't open" in **four distinct ways**. v1 covered two of them (stuck instances, window placement) but with wrong criteria; v2 covers all four:
 
 | # | Failure mode | What you see | What v2 does |
 |---|---|---|---|
@@ -34,7 +34,9 @@ The Codex desktop app (an MSIX-packaged Electron app; its main process is curren
 
 ---
 
-## Four corrections v2 makes to v1 (all backed by measurements)
+## Four changes v2 makes to v1 (all backed by measurements)
+
+(Items 1, 2 and 4 correct wrong criteria in v1; item 3 is a design change that also corrects a wrong conclusion I reached while investigating.)
 
 ### 1. `(-21333,-21333)` is **minimized**, not "off-screen"
 
@@ -86,16 +88,25 @@ HIDDEN 1 hidden window(s) left alone - the app already has a usable on-screen wi
 
 **Safety boundary**: **never show the computer-use overlay** (the one titled `is using your computer` is a full-screen window; showing it would cover the entire desktop).
 
-### 3. v1 queried processes with WMI, which **cannot see them here** — so the reap never fired
+### 3. v1 depended on WMI's command line to tell main instances apart; v2 uses `Get-Process` plus a whole-app criterion
+
+First, the conclusion: **v1's reap path did work on the real machine** — its log records **11 successful reaps** between 15:58 and 16:15 (see "Verification status"). v2 changed this for **design** reasons, not to fix a bug:
+
+| | v1 | v2 |
+|---|---|---|
+| Finding processes | `Win32_Process`, and reading the **command line** | `Get-Process` only |
+| Telling main instances apart | by "no `--type=` in the command line" | not needed at all |
+| Reap criterion | per process: does this pid own a window? | **whole app**: does the app own any window? |
+| Why that is steadier | — | Electron's helpers (renderer / GPU / crashpad) never own a window, so a per-process test would misfire on healthy instances |
+
+**A mistake I made during the investigation, and why it belongs in this repo**: while measuring from a **restricted context** I repeatedly saw WMI return 0 rows for these processes, and I wrote it up as "WMI cannot see them on this machine, so v1's reap can never fire". Re-testing from an unrestricted context:
 
 ```text
-Get-CimInstance Win32_Process -Filter "Name='ChatGPT.exe'"   ->  0 rows
+Get-CimInstance Win32_Process -Filter "Name='ChatGPT.exe'"   ->  8 rows   (same query: 0 rows from the restricted context)
 Get-Process -Name ChatGPT                                   ->  10 processes
 ```
 
-On this machine WMI (`Win32_Process`) does not list these processes at all. v1's reap logic depended on it, so it **could never trigger** — which is exactly why zombie instances stayed around forever.
-
-**v2**: process discovery uses `Get-Process` only. It also turned ① into a **whole-app condition** ("the app has processes, the app owns zero top-level windows, and it has been that way past the threshold") instead of a per-process test — Electron helper processes never own a window, so a per-process test would misfire on healthy instances.
+**That was a limitation of my measuring environment, not a property of the machine.** The lesson: a measurement must always be recorded together with the environment it was taken in — "invisible from inside a sandbox" is not "invisible on the machine". Details in [TROUBLESHOOTING.md](TROUBLESHOOTING.md) sections 5.3 and 8.
 
 ### 4. v1's 180-second threshold vs a 6-minute unpack → v1 created the loop itself
 
@@ -111,7 +122,8 @@ EFS certificate for the current user      = none
 
 Each file first tries to re-encrypt the destination, fails, and wastes ~0.14 s → 2,367 files ≈ **6 minutes**, with no window on screen. The logs contain 9 half-finished `.staging-<content hash>-<random>` directories.
 
-**v1 killed that legitimately-staging process at second 180** → progress reset → the user clicks again → loop.
+**v1's 180-second threshold would classify a legitimately-staging instance (6 minutes, no window) as stuck** (6 min > 180 s) → progress reset → the user clicks again → loop.
+⚠️ That is **derived from the threshold and the timing**, not from a direct log: the guard log only starts at 15:58, while the staging observed here happened at 15:25–15:30. v2's takeover does not depend on that inference being right — it is simply the better answer (10 s instead of 6 min).
 **v2 takes over ④**:
 
 ```text
@@ -181,7 +193,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\CodexGuar
 
 | Rule | Why |
 |---|---|
-| Process discovery uses `Get-Process`, never WMI | WMI cannot see these processes on this machine (see correction 3) |
+| Process discovery uses `Get-Process`, not WMI's command line | One less external dependency, and command-line parsing is unreliable in restricted contexts too (see correction 3) |
 | ① only reaps when the **whole app has zero top-level windows** and is past the threshold | Electron helpers never own a window; a per-process test would misfire |
 | ③ rescues **hidden** main windows only, and **only when the app has no usable window at all**; **minimized windows are never touched** | Minimized windows have a taskbar entry, and when the user can already see a window a hidden sibling is intentional |
 | ③ never shows the computer-use overlay | It is a full-screen window and would cover the desktop |
@@ -253,9 +265,10 @@ Merged result = a stdio server carrying a `url` → validation fails → **confi
 |---|---|
 | Script syntax (Windows PowerShell 5.1 parser) | ✅ passes |
 | `-DryRun` executed for real | ✅ all three scripts |
+| Scheduled task, full chain | ✅ **measured with v2**: `schtasks -> wscript.exe -> powershell -> codex-guard.ps1` works, writing to `%TEMP%\codex-guard.log`: `17:04:03 ---- guard run (dryRun=False) ----` |
 | Scheduled task creates no console flash | ✅ measured (carried over from v1, unchanged) |
 | ① no false positives on healthy instances | ✅ by design; v2's whole-app condition is strictly more conservative |
-| ① end-to-end reap | ⚠️ criteria come from a real stuck instance, but "after the reap the next click is a clean start" has not been verified against a live stuck instance |
+| ① end-to-end reap | ✅ **measured**: v1 reaped **11 times** on the real machine between 15:58 and 16:15 (log: `STUCK pid=… age=…s no windows -> cleaning up` + `KILLED pid=…`), instance ages 184 s to 854 s; v2 keeps the same criterion as a whole-app condition |
 | ③ hidden-window rescue | criteria ✅ **verified by running `-DryRun` on the live machine** (correctly distinguishes "the app has a usable window" from "the user can see nothing", and caught one false positive); whether `ShowWindow` actually takes effect ⚠️ still not verified end to end (no effect on another process from inside a restricted sandbox) |
 | ④ taking over the slow staging | ⚠️ **inferred**. The copied output's `manifest.json` SHA256 matches the official one exactly, but "the app accepts a hand-placed directory" can only be verified on the next app update |
 | ② wedged AppX container | Only "a reboot clears it" is measured; the script deliberately does nothing here |

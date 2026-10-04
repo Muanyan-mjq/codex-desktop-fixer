@@ -148,7 +148,7 @@ else { Say "ledger kept as-is (it only records history; keeping it stops a re-im
 Say ""
 Say "Next: the MCP merge only happened because the feature was on. With it off,"
 Say "the 'url is not supported for stdio in mcp_servers.github' error should stop."
-Say "If it still appears, run fix-github-mcp.ps1 (see README-fixes.md)."
+Say "If it still appears, run fix-github-mcp.ps1 (see TROUBLESHOOTING.md)."
 
 Say ""
 Say "done."
